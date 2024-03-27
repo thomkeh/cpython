@@ -13,6 +13,7 @@ typedef struct {
     PyObject_HEAD
     PyObject *args;
     PyObject *parameters;
+    PyObject *matchargs;
 } unionobject;
 
 static void
@@ -323,9 +324,88 @@ union_parameters(PyObject *self, void *Py_UNUSED(unused))
     return Py_NewRef(alias->parameters);
 }
 
+static PyObject *
+match_args_common_prefix(PyObject *args)
+{
+    PyObject *common_prefix = NULL;
+    Py_ssize_t len = PyTuple_GET_SIZE(args);
+
+    for (Py_ssize_t i = 0; i < len; i++) {
+        PyObject *cls = PyTuple_GET_ITEM(args, i);
+        PyObject *match_args = NULL;
+        if (PyObject_GetOptionalAttr(cls, &_Py_ID(__match_args__), &match_args) < 0) {
+            goto error;
+        }
+
+        if (match_args == NULL) {
+            Py_RETURN_NONE;
+        }
+
+        if (!PyTuple_Check(match_args)) {
+            Py_DECREF(match_args);
+            Py_RETURN_NONE;
+        }
+
+        if (common_prefix == NULL) {
+            common_prefix = match_args;
+            Py_INCREF(common_prefix);
+            continue;
+        }
+
+        Py_ssize_t old_len = PyTuple_GET_SIZE(common_prefix);
+        Py_ssize_t common_len = Py_MIN(old_len, PyTuple_GET_SIZE(match_args));
+        Py_ssize_t j;
+        for (j = 0; j < common_len; j++) {
+            PyObject *item1 = PyTuple_GET_ITEM(common_prefix, j);
+            PyObject *item2 = PyTuple_GET_ITEM(match_args, j);
+            if (!PyObject_RichCompareBool(item1, item2, Py_EQ)) {
+                break;
+            }
+        }
+
+        if (j != old_len) {
+            PyObject *new_common_prefix = PyTuple_GetSlice(common_prefix, 0, j);
+            Py_DECREF(common_prefix);
+            common_prefix = new_common_prefix;
+        }
+
+        Py_DECREF(match_args);
+
+        if (PyTuple_GET_SIZE(common_prefix) == 0) {
+            Py_CLEAR(common_prefix);
+            break;
+        }
+    }
+
+    if (common_prefix == NULL) {
+        Py_RETURN_NONE;
+    }
+
+    return common_prefix;
+
+error:
+    Py_XDECREF(common_prefix);
+    return NULL;
+}
+
+static PyObject *
+union_match_args(PyObject *self, void *Py_UNUSED(unused))
+{
+    unionobject *alias = (unionobject *)self;
+    if (alias->matchargs == NULL) {
+        alias->matchargs = match_args_common_prefix(alias->args);
+        if (alias->matchargs == NULL) {
+            return NULL;
+        }
+    }
+    return Py_NewRef(alias->matchargs);
+}
+
 static PyGetSetDef union_properties[] = {
     {"__parameters__", union_parameters, (setter)NULL,
      PyDoc_STR("Type variables in the types.UnionType."), NULL},
+    {"__match_args__", union_match_args, (setter)NULL,
+     PyDoc_STR("Match args"), NULL},
     {0}
 };
 
@@ -395,6 +475,7 @@ make_union(PyObject *args)
     }
 
     result->parameters = NULL;
+    result->matchargs = NULL;
     result->args = Py_NewRef(args);
     _PyObject_GC_TRACK(result);
     return (PyObject*)result;

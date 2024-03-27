@@ -26,6 +26,7 @@
 #include "pycore_sysmodule.h"     // _PySys_Audit()
 #include "pycore_tuple.h"         // _PyTuple_ITEMS()
 #include "pycore_typeobject.h"    // _PySuper_Lookup()
+#include "pycore_unionobject.h"   // _PyUnion_Check()
 #include "pycore_uop_ids.h"       // Uops
 #include "pycore_pyerrors.h"
 
@@ -432,7 +433,7 @@ fail:
 // raise TypeErrors for repeated lookups. On failure, return NULL (with no
 // error set). Use _PyErr_Occurred(tstate) to disambiguate.
 static PyObject *
-match_class_attr(PyThreadState *tstate, PyObject *subject, PyObject *type,
+match_class_attr(PyThreadState *tstate, PyObject *subject, const char *tp_name,
                  PyObject *name, PyObject *seen)
 {
     assert(PyUnicode_CheckExact(name));
@@ -442,7 +443,7 @@ match_class_attr(PyThreadState *tstate, PyObject *subject, PyObject *type,
             // Seen it before!
             _PyErr_Format(tstate, PyExc_TypeError,
                           "%s() got multiple sub-patterns for attribute %R",
-                          ((PyTypeObject*)type)->tp_name, name);
+                          tp_name, name);
         }
         return NULL;
     }
@@ -457,8 +458,15 @@ PyObject*
 _PyEval_MatchClass(PyThreadState *tstate, PyObject *subject, PyObject *type,
                    Py_ssize_t nargs, PyObject *kwargs)
 {
-    if (!PyType_Check(type)) {
-        const char *e = "called match pattern must be a class";
+    const char *tp_name;
+    if (PyType_Check(type)) {
+        tp_name = ((PyTypeObject*)type)->tp_name;
+    }
+    else if (_PyUnion_Check(type)) {
+        tp_name = "members of the union";
+    }
+    else {
+        const char *e = "called match pattern must be a class or a union";
         _PyErr_Format(tstate, PyExc_TypeError, e);
         return NULL;
     }
@@ -488,13 +496,12 @@ _PyEval_MatchClass(PyThreadState *tstate, PyObject *subject, PyObject *type,
         if (match_args) {
             if (!PyTuple_CheckExact(match_args)) {
                 const char *e = "%s.__match_args__ must be a tuple (got %s)";
-                _PyErr_Format(tstate, PyExc_TypeError, e,
-                              ((PyTypeObject *)type)->tp_name,
+                _PyErr_Format(tstate, PyExc_TypeError, e, tp_name,
                               Py_TYPE(match_args)->tp_name);
                 goto fail;
             }
         }
-        else {
+        else if (PyType_Check(type)) {
             // _Py_TPFLAGS_MATCH_SELF is only acknowledged if the type does not
             // define __match_args__. This is natural behavior for subclasses:
             // it's as if __match_args__ is some "magic" value that is lost as
@@ -509,8 +516,7 @@ _PyEval_MatchClass(PyThreadState *tstate, PyObject *subject, PyObject *type,
             const char *plural = (allowed == 1) ? "" : "s";
             _PyErr_Format(tstate, PyExc_TypeError,
                           "%s() accepts %d positional sub-pattern%s (%d given)",
-                          ((PyTypeObject*)type)->tp_name,
-                          allowed, plural, nargs);
+                          tp_name, allowed, plural, nargs);
             goto fail;
         }
         if (match_self) {
@@ -528,7 +534,7 @@ _PyEval_MatchClass(PyThreadState *tstate, PyObject *subject, PyObject *type,
                                   "(got %s)", Py_TYPE(name)->tp_name);
                     goto fail;
                 }
-                PyObject *attr = match_class_attr(tstate, subject, type, name,
+                PyObject *attr = match_class_attr(tstate, subject, tp_name, name,
                                                   seen);
                 if (attr == NULL) {
                     goto fail;
@@ -545,7 +551,7 @@ _PyEval_MatchClass(PyThreadState *tstate, PyObject *subject, PyObject *type,
     // Finally, the keyword subpatterns:
     for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(kwargs); i++) {
         PyObject *name = PyTuple_GET_ITEM(kwargs, i);
-        PyObject *attr = match_class_attr(tstate, subject, type, name, seen);
+        PyObject *attr = match_class_attr(tstate, subject, tp_name, name, seen);
         if (attr == NULL) {
             goto fail;
         }
